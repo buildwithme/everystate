@@ -41,6 +41,7 @@ pub struct Cx<'a> {
     pub cache: Option<&'a RefCell<Table>>,
     pub rec_on: &'a Cell<bool>,
     pub rec: &'a RefCell<Rec>,
+    pub cache_always: bool,
 }
 /// What the evaluation of a unit read and did, noted for the step cache.
 #[derive(Default)]
@@ -2167,6 +2168,10 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
     // measured again every 65536 evaluations, and a unit that does not pay is evaluated without the cache
     // for 262144 evaluations, then twice as long each time it fails again (up to 4 million; at once 4 million
     // when it is more than 30 % dearer).
+    if cx.cache_always {
+        // EVERYSTATE_STEP_CACHE=always (for testing): every unit uses the cache, whether or not it pays
+        return unit_cached(cx, k, table, id, bound, clear, inner, stat, n);
+    }
     let c = stat.count.get() + 1;
     stat.count.set(c);
     match stat.phase.get() {
@@ -2564,11 +2569,12 @@ pub struct Plans {
     rec_on: Cell<bool>,
     rec: RefCell<Rec>,
     units: Vec<Rc<UnitStat>>,
+    cache_always: bool,
 }
 
 /// EVERYSTATE_STEP_CACHE=on (an experiment; it implies the compiled evaluator)
 pub fn cache_enabled() -> bool {
-    matches!(std::env::var("EVERYSTATE_STEP_CACHE").as_deref(), Ok("on"))
+    matches!(std::env::var("EVERYSTATE_STEP_CACHE").as_deref(), Ok("on") | Ok("always"))
 }
 fn cache_budget() -> usize {
     let mb: f64 = std::env::var("EVERYSTATE_STEP_CACHE_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(32.0);
@@ -2640,6 +2646,7 @@ pub fn compile(model: &crate::model::Model) -> Plans {
         rec_on: Cell::new(false),
         rec: RefCell::new(Rec::default()),
         units,
+        cache_always: matches!(std::env::var("EVERYSTATE_STEP_CACHE").as_deref(), Ok("always")),
     }
 }
 
@@ -2655,7 +2662,7 @@ impl Plans {
                 return None;
             }
         };
-        let cx = Cx { ev, f: &p.frame, cur, nxt, nv: nv as i64, fallbacks: &self.n.fallbacks, cache: self.cache.as_ref(), rec_on: &self.rec_on, rec: &self.rec };
+        let cx = Cx { ev, f: &p.frame, cur, nxt, nv: nv as i64, fallbacks: &self.n.fallbacks, cache: self.cache.as_ref(), rec_on: &self.rec_on, rec: &self.rec, cache_always: self.cache_always };
         let f0 = self.n.fallbacks.get();
         let r = (p.run)(&cx, k);
         self.rec_on.set(false);
@@ -2676,7 +2683,7 @@ impl Plans {
                 return None;
             }
         };
-        let cx = Cx { ev, f: &p.frame, cur: s, nxt: &self.blank, nv: nv as i64, fallbacks: &self.n.fallbacks, cache: None, rec_on: &self.rec_on, rec: &self.rec };
+        let cx = Cx { ev, f: &p.frame, cur: s, nxt: &self.blank, nv: nv as i64, fallbacks: &self.n.fallbacks, cache: None, rec_on: &self.rec_on, rec: &self.rec, cache_always: self.cache_always };
         let f0 = self.n.fallbacks.get();
         let r = (p.run)(&cx);
         p.use_.note(self.n.fallbacks.get() - f0);
