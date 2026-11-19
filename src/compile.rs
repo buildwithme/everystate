@@ -431,6 +431,7 @@ pub struct UnitStat {
     /// sampled times without and with the cache
     plain: Mean,
     cached: Mean,
+    was_on: Cell<bool>,
 }
 type Loc4 = [u32; 4];
 
@@ -1789,7 +1790,7 @@ impl Comp {
         let clear = self.cache_slots.clone();
         let id = (self.plan_id << 16) | self.units;
         self.units += 1;
-        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_BASE), count: Cell::new(0), plain: Mean::default(), cached: Mean::default() });
+        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_BASE), count: Cell::new(0), plain: Mean::default(), cached: Mean::default(), was_on: Cell::new(false) });
         self.unit_stats.push(stat.clone());
         Box::new(move |cx, k| unit_run(cx, k, id, &bound, &clear, &inner, &stat, n))
     }
@@ -2140,7 +2141,7 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
         _ => return inner(cx, k),
     };
     // Whether the cache pays for this unit is measured, not assumed: the time of evaluations without it
-    // (a baseline of 256, one in 4 timed) against the time of evaluations with it once the table is warm
+    // (a baseline of 256, every other one timed) against the time of evaluations with it once the table is warm
     // (hits and misses as they come). A unit keeps the cache only while that is at least 5 % cheaper; it is
     // measured again every 65536 evaluations, and a unit that does not pay is evaluated without the cache
     // for 65536 evaluations, then twice as long each time it fails again (up to 4 million).
@@ -2154,7 +2155,7 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             inner(cx, k)
         }
         PH_BASE => {
-            let r = if c % 4 == 0 {
+            let r = if c % 2 == 0 {
                 let t = now_ns();
                 let r = inner(cx, k);
                 stat.plain.add(now_ns() - t);
@@ -2244,12 +2245,16 @@ impl UnitStat {
     /// The verdict after a measurement.
     fn judge(&self) {
         let (plain, cached) = (self.plain.mean(), self.cached.mean());
-        if self.plain.n.get() > 0 && self.cached.n.get() > 0 && cached < 0.95 * plain {
+        // (a unit that has the cache keeps it unless it has stopped paying; one that has not must gain 5 %)
+        let need = if self.was_on.get() { 1.0 } else { 0.95 };
+        if self.plain.n.get() > 0 && self.cached.n.get() > 0 && cached < need * plain {
+            self.was_on.set(true);
             self.penalty.set(0);
             self.off.set(false);
             self.cached.reset();
             self.enter(PH_ON);
         } else {
+            self.was_on.set(false);
             let p = (self.penalty.get() * 2).clamp(65536, 1 << 22);
             self.penalty.set(p);
             self.skip.set(p);
