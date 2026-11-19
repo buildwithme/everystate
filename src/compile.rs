@@ -2181,8 +2181,8 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
     // higher at all past 1024 states per side (a trial costs time too). A unit that has the cache goes on
     // trial again after a million evaluations (or 16 times the length of its last trial, if that is more),
     // or when 4096 evaluations missed more than one time in five, and keeps it unless that trial goes
-    // against it; a unit that does not pay is evaluated without the cache for as long, then twice as long
-    // each time it fails again (up to 4 million; at once 4 million when it is far from paying).
+    // against it; a unit that does not pay is evaluated without the cache for as long, longer when it
+    // fails again (up to 4 million evaluations; at once 4 million when it is far from paying).
     if cx.cache_always {
         // EVERYSTATE_STEP_CACHE=always (for testing): every unit uses the cache, whether or not it pays
         return unit_cached(cx, k, table, id, bound, clear, inner, stat, n);

@@ -496,3 +496,129 @@ GameOfLife 9.05 / 9.09 (median of 5, 0 % hits), SlidingPuzzles 1.09 / 1.10 (medi
 then the unit backs off), CoffeeCan100Beans 0.05 / 0.04 (16,384 lookups, no hit). Where the hit rate is
 middling and the keys are large the cache costs time even with the back-off: MCLamportMutex 11.55 / 13.20
 (+14 %), MCbtree 11.17 / 12.04 (+8 %).
+
+## The step cache on by default (2026-11-19)
+
+The step cache of the previous section is now on whenever the compiled evaluator is (`EVERYSTATE_STEP_CACHE=off`
+turns it off; `EVERYSTATE_EVAL=tree` turns both off; `EVERYSTATE_STEP_CACHE=always` gives the cache to
+every unit whether or not it pays, for testing). In the WebAssembly build it stays off: the decision below
+needs a clock. The table is as before: fixed size, direct-mapped, 32 MB by default
+(`EVERYSTATE_STEP_CACHE_MB`), one per worker, every hit compared in full.
+
+What changed is how a unit (an action instance) gets the cache. The hit rate alone decided before, and that
+was wrong both ways: a unit can hit 97 % of the time and still be dearer with the cache (MCLamportMutex,
+MCbtree), and timing the unit alone misses most of the gain, which comes after the unit (a successor built
+from a stored change shares values with its parent, so less is hashed, allocated and kept). So the cost is
+measured, on the whole work per state:
+
+- a unit first runs with the cache for 256 evaluations; if nothing could be stored in the first 32, or
+  fewer than half of the 256 were hits, it is evaluated without the cache from then on (it is tried again
+  after 4 million evaluations);
+- then it is on trial: each state expanded is taken with or without the cache (a hash of the state's
+  number decides, the same way for every unit on trial, so units tried together are judged on their joint
+  effect), and the time from that expansion to the next is added to one of two means;
+- the units get the cache when the mean with it is lower by 2.5 standard errors (looked at every 256
+  states once there are 512 per side) or by one standard error after 4096 states per side; the trial ends
+  without the cache when the mean with it is higher by 2.5 standard errors, higher at all after 1024 states
+  per side, or not lower by one standard error after 4096;
+- a unit with the cache goes on trial again after a million evaluations, or as soon as 4096 evaluations
+  miss more than one time in five, and keeps the cache unless that trial goes against it; a unit without it
+  is tried again after a million evaluations (or 16 times the length of its last trial, if that is more),
+  later each time it fails again, up to 4 million.
+
+No clock is read while no unit is on trial. A model too small for a trial (a few thousand states) runs
+almost entirely without the cache. Because the decision depends on timing, which units have the cache can
+differ from run to run; the states found, the counts and the traces do not (a hit yields exactly what the
+evaluation would).
+
+Same machine and method as above: CPU seconds of the whole process, median of 5, compiled without the cache
+(`EVERYSTATE_STEP_CACHE=off`) and with it (the default) run in turn, one process at a time, load average 1.0
+(`bench/cache-default.json`, `bench/examples-over-1s.json`, `bench/workers-cache.json`;
+`scripts/bench-steps.py`, `scripts/bench-examples.py`, `scripts/bench-workers-ab.py`).
+
+**The five larger models** (CPU seconds, median of 5; peak RSS in MB)
+
+| model | distinct | compiled | compiled + cache | ratio | RSS compiled / cache |
+|---|---:|---:|---:|---:|---:|
+| OrSet-fixed-f1 | 129242 | 0.91 | 0.76 | 0.83 | 106 / 100 |
+| OrSet-fixed-f4 | 524832 | 3.82 | 3.06 | 0.80 | 386 / 320 |
+| ReadRepair-fixed-f6 | 383579 | 2.88 | 2.46 | 0.85 | 228 / 209 |
+| LostUpdate-fixed-f6 | 420646 | 2.47 | 2.09 | 0.85 | 226 / 207 |
+| LeaseLock-fixed-f5 | 122728 | 0.74 | 0.63 | 0.86 | 76 / 72 |
+| **total** | | 10.81 | 9.00 | 0.833 | |
+
+**The 11 corpus configurations** (CPU seconds, median of 5; peak RSS in MB)
+
+| model | distinct | compiled | compiled + cache | ratio | RSS compiled / cache |
+|---|---:|---:|---:|---:|---:|
+| LeaseLock-fixed-f1 | 15009 | 0.07 | 0.06 | 0.88 | 18 / 18 |
+| LeaseLock-buggy-f1 | 16318 | 0.07 | 0.06 | 0.91 | 18 / 18 |
+| OrSet-fixed-f0 | 39568 | 0.26 | 0.26 | 1.00 | 42 / 44 |
+| OrSet-fixed-f1 | 129242 | 0.93 | 0.76 | 0.82 | 106 / 88 |
+| OrSet-buggy-f1 | 7126 | 0.04 | 0.03 | 0.85 | 14 / 14 |
+| ReadRepair-fixed-f0 | 8972 | 0.06 | 0.06 | 1.05 | 16 / 16 |
+| ReadRepair-fixed-f1 | 37309 | 0.23 | 0.26 | 1.14 | 32 / 34 |
+| ReadRepair-buggy-f0 | 9332 | 0.06 | 0.06 | 1.03 | 16 / 16 |
+| ReadRepair-buggy-f1 | 38437 | 0.25 | 0.25 | 1.00 | 32 / 34 |
+| LostUpdate-fixed-f1 | 13926 | 0.05 | 0.05 | 0.87 | 16 / 16 |
+| LostUpdate-buggy-f1 | 22799 | 0.09 | 0.07 | 0.80 | 22 / 20 |
+| **total** | | 2.09 | 1.92 | 0.916 | |
+
+**The 12 models of the first table** (CPU seconds, median of 5; peak RSS in MB)
+
+| model | distinct | compiled | compiled + cache | ratio | RSS compiled / cache |
+|---|---:|---:|---:|---:|---:|
+| TCommit | 34 | 0.01 | 0.00 | 0.80 | 14 / 14 |
+| ACP_SB_TLC | 54944 | 0.27 | 0.27 | 0.98 | 28 / 28 |
+| StaleShrinkV6Wait2x | 43348 | 0.26 | 0.27 | 1.02 | 28 / 28 |
+| Barriers | 29279 | 1.78 | 1.79 | 1.01 | 21 / 22 |
+| SimpleRegular | 277726 | 3.22 | 3.02 | 0.94 | 178 / 179 |
+| Paxos | 1207 | 0.71 | 0.68 | 0.96 | 52 / 52 |
+| VoteProof | 6962 | 5.09 | 5.03 | 0.99 | 16 / 18 |
+| MCNanoMedium | 530587 | 13.02 | 12.80 | 0.98 | 616 / 617 |
+| MCBakery | 655200 | 6.87 | 6.87 | 1.00 | 213 / 214 |
+| MCLamportMutex | 724274 | 9.78 | 10.13 | 1.04 | 532 / 533 |
+| MCbtree | 374727 | 10.10 | 10.28 | 1.02 | 193 / 193 |
+| GameOfLife | 65536 | 8.36 | 8.55 | 1.02 | 36 / 37 |
+| **total** | | 59.46 | 59.68 | 1.004 | |
+
+**Examples gate models over 1 s** (CPU seconds, median of 5, worst ratio first; peak RSS in MB)
+
+| model | distinct | compiled | compiled + cache | ratio | RSS compiled / cache |
+|---|---:|---:|---:|---:|---:|
+| MCBinarySearch | 27953 | 0.92 | 0.95 | 1.035 | 120 / 122 |
+| GameOfLife | 65536 | 8.49 | 8.65 | 1.019 | 36 / 37 |
+| VoteProof | 6962 | 5.12 | 5.21 | 1.018 | 16 / 18 |
+| MCCRDT | 25000 | 4.34 | 4.41 | 1.015 | 38 / 42 |
+| Barriers | 29279 | 1.81 | 1.81 | 0.997 | 21 / 23 |
+| YoYoAllGraphs | 26731 | 2.12 | 2.11 | 0.996 | 48 / 48 |
+| MCQuicksort | 4548 | 2.61 | 2.59 | 0.995 | 15 / 17 |
+| SpanTreeRandom | 65396 | 2.78 | 2.69 | 0.968 | 80 / 82 |
+| SimpleRegular | 277726 | 3.31 | 3.10 | 0.937 | 178 / 178 |
+
+**1 and 4 workers** (wall seconds / CPU seconds / peak RSS in MB, median of 5)
+
+| model | 1 worker, compiled | 1 worker, cache | 4 workers, compiled | 4 workers, cache | wall 4 workers: cache / compiled |
+|---|---:|---:|---:|---:|---:|
+| OrSet-fixed-f4 | 3.91 / 3.88 / 386 | 3.15 / 3.12 / 317 | 1.34 / 4.49 / 261 | 1.33 / 4.45 / 267 | 0.99 |
+| ReadRepair-fixed-f6 | 2.86 / 2.86 / 228 | 2.57 / 2.53 / 209 | 0.96 / 3.24 / 175 | 0.91 / 3.04 / 195 | 0.95 |
+| LostUpdate-fixed-f6 | 2.72 / 2.69 / 226 | 2.14 / 2.13 / 208 | 0.82 / 2.80 / 156 | 0.74 / 2.45 / 156 | 0.90 |
+| LeaseLock-fixed-f5 | 0.74 / 0.73 / 76 | 0.63 / 0.63 / 72 | 0.29 / 0.81 / 77 | 0.26 / 0.73 / 77 | 0.90 |
+| MCBakery | 7.37 / 7.27 / 213 | 6.91 / 6.85 / 214 | 3.75 / 7.91 / 356 | 3.83 / 7.82 / 366 | 1.02 |
+| SimpleRegular | 3.24 / 3.19 / 178 | 3.03 / 3.02 / 162 | 1.46 / 5.13 / 146 | 1.51 / 5.26 / 150 | 1.03 |
+| VoteProof | 5.13 / 5.11 / 16 | 5.08 / 5.03 / 18 | 1.62 / 5.30 / 46 | 1.57 / 5.14 / 48 | 0.97 |
+
+Single runs on this machine vary by about ±4 % and medians of 5 by about ±2 to 3 % (GameOfLife, where the
+cache does nothing at all after the first 512 evaluations, reads between 0.99 and 1.02 from series to
+series). The models that read above 1.02 in one of the tables were measured again alone, the two variants
+alternating: MCLamportMutex 10.18 / 9.98 (0.98, 8 runs each), MCbtree 10.06 / 10.16 (1.01, 6 runs),
+GameOfLife 8.69 / 8.64 (0.995, 8 runs), MCBinarySearch 0.93 / 0.95 (1.02, 10 runs), YoYoAllGraphs
+2.10 / 2.10 (1.00, 10 runs). The configurations of the 11 that take under 0.1 s are below what this
+measurement resolves.
+
+Memory: the table is allocated per worker and touched only as entries are stored, so the bound with
+`-workers 4` is 4 x 32 MB above the run without the cache; measured, peak RSS with 4 workers is between
+equal and 20 MB higher (ReadRepair with 6 faults 175 -> 195 MB, MCBakery 356 -> 366 MB), and with one
+worker it is lower on the actor models (OrSet with 4 faults 386 -> 320 MB) and within 4 MB elsewhere.
+With 4 workers each worker measures its own units on its own share of the states, so the gain is smaller
+than with one.
