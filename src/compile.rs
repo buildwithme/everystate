@@ -421,12 +421,16 @@ pub struct UnitStat {
     loc: Loc4,
     lookups: Cell<u64>,
     hits: Cell<u64>,
-    /// hits at the start of the current window
-    mark: Cell<u64>,
-    /// the last window failed (the unit is backing off, or trying again after backing off)
+    /// the last measurement said the cache does not pay for this unit
     off: Cell<bool>,
     skip: Cell<u64>,
     penalty: Cell<u64>,
+    phase: Cell<u8>,
+    /// evaluations in the current phase
+    count: Cell<u64>,
+    /// sampled times without and with the cache
+    plain: Mean,
+    cached: Mean,
 }
 type Loc4 = [u32; 4];
 
@@ -1785,7 +1789,7 @@ impl Comp {
         let clear = self.cache_slots.clone();
         let id = (self.plan_id << 16) | self.units;
         self.units += 1;
-        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), mark: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0) });
+        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_BASE), count: Cell::new(0), plain: Mean::default(), cached: Mean::default() });
         self.unit_stats.push(stat.clone());
         Box::new(move |cx, k| unit_run(cx, k, id, &bound, &clear, &inner, &stat, n))
     }
@@ -2135,12 +2139,129 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
         Some(t) if !cx.rec_on.get() && cx.ev.n_assigned.get() == 0 => t,
         _ => return inner(cx, k),
     };
-    let skip = stat.skip.get();
-    if skip > 0 {
-        // backing off: evaluated without the cache
-        stat.skip.set(skip - 1);
-        return inner(cx, k);
+    // Whether the cache pays for this unit is measured, not assumed: the time of evaluations without it
+    // (a baseline of 256, one in 4 timed) against the time of evaluations with it once the table is warm
+    // (hits and misses as they come). A unit keeps the cache only while that is at least 5 % cheaper; it is
+    // measured again every 65536 evaluations, and a unit that does not pay is evaluated without the cache
+    // for 65536 evaluations, then twice as long each time it fails again (up to 4 million).
+    let c = stat.count.get() + 1;
+    stat.count.set(c);
+    match stat.phase.get() {
+        PH_OFF => {
+            if c >= stat.skip.get() {
+                stat.enter(PH_BASE);
+            }
+            inner(cx, k)
+        }
+        PH_BASE => {
+            let r = if c % 4 == 0 {
+                let t = now_ns();
+                let r = inner(cx, k);
+                stat.plain.add(now_ns() - t);
+                r
+            } else {
+                inner(cx, k)
+            };
+            if c == 256 {
+                stat.enter(if stat.cached.n.get() > 0 { PH_JUDGE } else { PH_WARM });
+                if stat.phase.get() == PH_JUDGE {
+                    stat.judge();
+                }
+            }
+            r
+        }
+        PH_WARM => {
+            if c == 1024 {
+                stat.enter(PH_MEASURE);
+            }
+            unit_cached(cx, k, table, id, bound, clear, inner, stat, n)
+        }
+        ph => {
+            // PH_MEASURE (one in 4 timed, 2048 evaluations, then the verdict) or PH_ON (one in 64 timed)
+            let sample = if ph == PH_MEASURE { c % 4 == 0 } else { c % 64 == 0 };
+            let r = if sample {
+                let t = now_ns();
+                let r = unit_cached(cx, k, table, id, bound, clear, inner, stat, n);
+                stat.cached.add(now_ns() - t);
+                r
+            } else {
+                unit_cached(cx, k, table, id, bound, clear, inner, stat, n)
+            };
+            if ph == PH_MEASURE && c == 2048 {
+                stat.judge();
+            } else if ph == PH_ON && c == 65536 {
+                // a fresh baseline, then the verdict again
+                stat.plain.reset();
+                stat.enter(PH_BASE);
+            }
+            r
+        }
     }
+}
+const PH_BASE: u8 = 0;
+const PH_WARM: u8 = 1;
+const PH_MEASURE: u8 = 2;
+const PH_ON: u8 = 3;
+const PH_OFF: u8 = 4;
+const PH_JUDGE: u8 = 5;
+/// Nanoseconds from some fixed moment. (No clock in WebAssembly: there the measurement reads zero and no
+/// unit ever keeps the cache.)
+#[cfg(not(target_arch = "wasm32"))]
+fn now_ns() -> u64 {
+    use std::sync::OnceLock;
+    static T0: OnceLock<std::time::Instant> = OnceLock::new();
+    T0.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+}
+#[cfg(target_arch = "wasm32")]
+fn now_ns() -> u64 {
+    0
+}
+#[derive(Default)]
+struct Mean {
+    sum: Cell<u64>,
+    n: Cell<u64>,
+}
+impl Mean {
+    #[inline]
+    fn add(&self, dt: u64) {
+        // (one descheduled sample must not decide)
+        self.sum.set(self.sum.get() + dt.min(200_000));
+        self.n.set(self.n.get() + 1);
+    }
+    fn reset(&self) {
+        self.sum.set(0);
+        self.n.set(0);
+    }
+    fn mean(&self) -> f64 {
+        self.sum.get() as f64 / self.n.get().max(1) as f64
+    }
+}
+impl UnitStat {
+    fn enter(&self, phase: u8) {
+        self.phase.set(phase);
+        self.count.set(0);
+    }
+    /// The verdict after a measurement.
+    fn judge(&self) {
+        let (plain, cached) = (self.plain.mean(), self.cached.mean());
+        if self.plain.n.get() > 0 && self.cached.n.get() > 0 && cached < 0.95 * plain {
+            self.penalty.set(0);
+            self.off.set(false);
+            self.cached.reset();
+            self.enter(PH_ON);
+        } else {
+            let p = (self.penalty.get() * 2).clamp(65536, 1 << 22);
+            self.penalty.set(p);
+            self.skip.set(p);
+            self.off.set(true);
+            self.plain.reset();
+            self.cached.reset();
+            self.enter(PH_OFF);
+        }
+    }
+}
+#[allow(clippy::too_many_arguments)]
+fn unit_cached(cx: &Cx, k: &mut dyn FnMut() -> R<()>, table: &RefCell<Table>, id: u32, bound: &[usize], clear: &[usize], inner: &AE, stat: &UnitStat, n: N) -> R<()> {
     let nv = cx.nv as usize;
     let mut h0 = sc_::mix(0x5EED, id as u64);
     for &s in bound {
@@ -2149,26 +2270,7 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             Err(_) => return inner(cx, k),
         }
     }
-    let lookups = stat.lookups.get() + 1;
-    stat.lookups.set(lookups);
-    // Back-off: a miss costs more than an evaluation without the cache (the reads are noted and an entry
-    // is built), so a unit pays only at a high hit rate. Each window of 4096 lookups is judged on its own:
-    // the first (the table is cold) must reach 50 %, every later one 75 %. A unit that fails is evaluated
-    // without the cache for a while, twice as long each time it fails again (up to a million evaluations),
-    // so that a unit that never hits spends at most a few per cent of its evaluations finding that out.
-    if lookups % 4096 == 0 {
-        let hits = stat.hits.get();
-        let window = hits - stat.mark.replace(hits);
-        if window * 20 < 4096 * if lookups == 4096 { 10 } else { 15 } {
-            let p = (stat.penalty.get() * 2).clamp(16 * 4096, 1 << 20);
-            stat.penalty.set(p);
-            stat.skip.set(p);
-            stat.off.set(true);
-        } else {
-            stat.penalty.set(0);
-            stat.off.set(false);
-        }
-    }
+    stat.lookups.set(stat.lookups.get() + 1);
     // 1. an entry whose unit, bound values and reads all match this state
     let hit: Option<Vec<Value>> = cx.cur.with(|cv| {
         let t = table.borrow();
@@ -2533,7 +2635,7 @@ impl Plans {
             let t = t.borrow();
             let off = self.units.iter().filter(|u| u.off.get()).count();
             cache = format!(
-                "step cache: budget {:.1} MB, in use {:.1} MB (peak {:.1} MB); {} units, {} backing off for a low hit rate; {} lookups, {} hits ({:.2}%), {} stored, {} replaced, {} not stored for size, {} evaluations not cacheable\n",
+                "step cache: budget {:.1} MB, in use {:.1} MB (peak {:.1} MB); {} units, {} measured as not paying; {} lookups, {} hits ({:.2}%), {} stored, {} replaced, {} not stored for size, {} evaluations not cacheable\n",
                 t.budget as f64 / 1048576.0,
                 t.used as f64 / 1048576.0,
                 t.peak as f64 / 1048576.0,
@@ -2549,7 +2651,7 @@ impl Plans {
             );
             if std::env::var_os("EVERYSTATE_EVAL_DEBUG").is_some() {
                 for u in &self.units {
-                    cache += &format!("  unit at line {} col {}: {} lookups, {} hits{}\n", u.loc[0], u.loc[1], u.lookups.get(), u.hits.get(), if u.off.get() { " (backing off)" } else { "" });
+                    cache += &format!("  unit at line {} col {}: {} lookups, {} hits{}\n", u.loc[0], u.loc[1], u.lookups.get(), u.hits.get(), if u.off.get() { " (does not pay)" } else { "" });
                 }
             }
         }
