@@ -435,6 +435,7 @@ pub struct UnitStat {
     /// hits when the warm-up began
     mark: Cell<u64>,
     last: Cell<(f64, f64)>,
+    mark_l: Cell<u64>,
     /// successors handed out on hits
     succs: Cell<u64>,
 }
@@ -1806,7 +1807,7 @@ impl Comp {
         let clear = self.cache_slots.clone();
         let id = (self.plan_id << 16) | self.units;
         self.units += 1;
-        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_BASE), count: Cell::new(0), plain: Mean::default(), cached: Mean::default(), was_on: Cell::new(false), mark: Cell::new(0), last: Cell::new((0.0, 0.0)), succs: Cell::new(0) });
+        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_BASE), count: Cell::new(0), plain: Mean::default(), cached: Mean::default(), was_on: Cell::new(false), mark: Cell::new(0), last: Cell::new((0.0, 0.0)), mark_l: Cell::new(0), succs: Cell::new(0) });
         self.unit_stats.push(stat.clone());
         Box::new(move |cx, k| unit_run(cx, k, id, &bound, &clear, &inner, &stat, n))
     }
@@ -2161,7 +2162,8 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
     // (hits and misses as they come). A unit gets the cache when that is 10 % cheaper and keeps it while it is
     // 3 % cheaper; it is
     // measured again every 65536 evaluations, and a unit that does not pay is evaluated without the cache
-    // for 65536 evaluations, then twice as long each time it fails again (up to 4 million).
+    // for 262144 evaluations, then twice as long each time it fails again (up to 4 million; at once 4 million
+    // when it is more than 30 % dearer).
     let c = stat.count.get() + 1;
     stat.count.set(c);
     match stat.phase.get() {
@@ -2182,7 +2184,9 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             };
             if c == 256 {
                 stat.mark.set(stat.hits.get());
-                stat.enter(if stat.cached.n.get() > 0 { PH_JUDGE } else { PH_WARM });
+                stat.mark_l.set(stat.lookups.get());
+                // (a unit that takes less time than a lookup, typically a guard that fails, is not tried)
+                stat.enter(if stat.cached.n.get() > 0 || stat.plain.mean() < 150.0 { PH_JUDGE } else { PH_WARM });
                 if stat.phase.get() == PH_JUDGE {
                     stat.judge();
                 }
@@ -2190,10 +2194,10 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             r
         }
         PH_WARM => {
-            if c == 512 {
-                // a table that is still mostly missing after 512 lookups is not going to pay
+            if c == 256 {
+                // a table that is still mostly missing after 256 lookups is not going to pay
                 let hits = stat.hits.get() - stat.mark.get();
-                if hits * 2 < 512 {
+                if hits * 2 < 256 {
                     stat.cached.reset();
                     stat.judge();
                 } else {
@@ -2203,7 +2207,7 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             unit_cached(cx, k, table, id, bound, clear, inner, stat, n)
         }
         ph => {
-            // PH_MEASURE (one in 4 timed, 2048 evaluations, then the verdict) or PH_ON (one in 64 timed)
+            // PH_MEASURE (every other one timed, 256 evaluations, then the verdict) or PH_ON (one in 64 timed)
             let sample = if ph == PH_MEASURE { c % 2 == 0 } else { c % 64 == 0 };
             let r = if sample {
                 let t = now_ns();
@@ -2213,7 +2217,7 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             } else {
                 unit_cached(cx, k, table, id, bound, clear, inner, stat, n)
             };
-            if ph == PH_MEASURE && c == 512 {
+            if ph == PH_MEASURE && c == 256 {
                 stat.judge();
             } else if ph == PH_ON && c == 65536 {
                 // a fresh baseline, then the verdict again
@@ -2276,7 +2280,8 @@ impl UnitStat {
         // after the unit, in fingerprinting and in memory; so a unit that mostly yields successors gets the
         // cache at equal time and keeps it up to 10 % above, while one that mostly yields none (a guard that
         // fails) has nothing to gain downstream and must be 10 % cheaper to get it, 3 % to keep it.
-        let yields = self.succs.get() * 2 >= self.hits.get().max(1);
+        // (only at a hit rate of 90 % or more: misses share nothing)
+        let yields = self.succs.get() * 2 >= self.hits.get().max(1) && self.hits.get() * 10 >= self.lookups.get() * 9;
         let need = match (yields, self.was_on.get()) {
             (true, true) => 1.10,
             (true, false) => 1.0,
@@ -2291,7 +2296,11 @@ impl UnitStat {
             self.enter(PH_ON);
         } else {
             self.was_on.set(false);
-            let p = (self.penalty.get() * 2).clamp(65536, 1 << 22);
+            // far from paying: not worth trying again soon
+            // (judged only when the table was warm, or plainly never will be)
+            let (looked, hit) = (self.lookups.get() - self.mark_l.get(), self.hits.get() - self.mark.get());
+            let far = self.cached.n.get() == 0 || hit * 2 < looked || (hit * 10 >= looked * 9 && cached > 1.3 * plain);
+            let p = if far { 1 << 22 } else { (self.penalty.get() * 2).clamp(1 << 18, 1 << 22) };
             self.penalty.set(p);
             self.skip.set(p);
             self.off.set(true);
