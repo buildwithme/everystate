@@ -438,6 +438,10 @@ pub struct UnitStat {
     /// the means at the last verdict, and the number of states it was based on
     last: Cell<(f64, f64)>,
     trials: Cell<u64>,
+    /// evaluations before the next trial (16 times the length of the last one, at least 262144)
+    again: Cell<u64>,
+    /// on trial: the unit had the cache before
+    held: Cell<bool>,
     /// hits and lookups when the warm-up or the current window began
     mark: Cell<u64>,
     mark_l: Cell<u64>,
@@ -1813,7 +1817,7 @@ impl Comp {
         let clear = self.cache_slots.clone();
         let id = (self.plan_id << 16) | self.units;
         self.units += 1;
-        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_WARM), count: Cell::new(0), acc: Default::default(), seen: Cell::new(0), arm: Cell::new(false), last: Cell::new((0.0, 0.0)), trials: Cell::new(0), mark: Cell::new(0), mark_l: Cell::new(0), stored: Cell::new(0), mark_s: Cell::new(0) });
+        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_WARM), count: Cell::new(0), acc: Default::default(), seen: Cell::new(0), arm: Cell::new(false), last: Cell::new((0.0, 0.0)), trials: Cell::new(0), again: Cell::new(1 << 20), held: Cell::new(false), mark: Cell::new(0), mark_l: Cell::new(0), stored: Cell::new(0), mark_s: Cell::new(0) });
         self.unit_stats.push(stat.clone());
         Box::new(move |cx, k| unit_run(cx, k, id, &bound, &clear, &inner, &stat, n))
     }
@@ -2163,16 +2167,22 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
         Some(t) if !cx.rec_on.get() && cx.ev.n_assigned.get() == 0 => t,
         _ => return inner(cx, k),
     };
-    // Whether the cache pays for this unit is measured, not assumed, and measured on the whole work per
-    // state rather than on the unit alone (a successor built from an entry shares its new values with its
-    // parent and with the other successors built from that entry, which saves time after the unit, in
-    // fingerprinting and in memory). After a warm-up the unit goes on trial: for each state expanded it is
-    // evaluated with or without the cache, chosen by a hash of the state's number, and the time from that
-    // expansion to the next is added to the one or the other mean (`UnitStat::sample`). The unit gets the
-    // cache when the mean with it is lower. A unit that has the cache goes on trial again every 262144
-    // evaluations, or when 4096 evaluations missed more than one time in five; a unit that does not pay is
-    // evaluated without the cache for 262144 evaluations, then twice as long each time it fails again (up
-    // to 4 million; at once 4 million when it is far from paying).
+    // Whether the cache pays is measured, not assumed, and measured on the whole work per state rather
+    // than on the unit alone (a successor built from an entry shares its new values with its parent and
+    // with the other successors built from that entry, which saves time after the unit, in fingerprinting
+    // and in memory). After a warm-up the unit goes on trial: each state expanded is taken with or without
+    // the cache, by a hash of its number, and the time from that expansion to the next is added to the one
+    // or the other mean of every unit on trial evaluated in it (`UnitStat::sample`). The choice is the same
+    // for all units on trial, so units that are tried together are judged together, on their joint effect
+    // (the effect of one unit alone is often too small to tell from noise in a reasonable time, while
+    // twenty such effects add up). A unit gets the cache when the mean with it is lower by 2.5 standard
+    // errors (looked at every 256 states from 512 per side on), or by one standard error after 4096
+    // states per side; the trial ends without the cache when the mean with it is higher by as much, or
+    // higher at all past 1024 states per side (a trial costs time too). A unit that has the cache goes on
+    // trial again after a million evaluations (or 16 times the length of its last trial, if that is more),
+    // or when 4096 evaluations missed more than one time in five, and keeps it unless that trial goes
+    // against it; a unit that does not pay is evaluated without the cache for as long, then twice as long
+    // each time it fails again (up to 4 million; at once 4 million when it is far from paying).
     if cx.cache_always {
         // EVERYSTATE_STEP_CACHE=always (for testing): every unit uses the cache, whether or not it pays
         return unit_cached(cx, k, table, id, bound, clear, inner, stat, n);
@@ -2210,7 +2220,7 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             let e = cx.meas.exp.get();
             if stat.seen.get() != e {
                 stat.seen.set(e);
-                stat.arm.set((sc_::mix(e, id as u64) >> 17) & 1 == 1);
+                stat.arm.set((sc_::mix(e, 0x7A11) >> 17) & 1 == 1);
                 cx.meas.touched.borrow_mut().push(stat.clone());
             }
             if stat.arm.get() {
@@ -2222,7 +2232,7 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
         _ => {
             if c % 4096 == 0 {
                 let (looked, hit) = (stat.lookups.get() - stat.mark_l.get(), stat.hits.get() - stat.mark.get());
-                if c >= 1 << 18 || hit * 5 < looked * 4 {
+                if c >= stat.again.get() || hit * 5 < looked * 4 {
                     stat.begin_trial(cx.meas);
                 } else {
                     stat.mark.set(stat.hits.get());
@@ -2313,6 +2323,7 @@ impl UnitStat {
         self.count.set(0);
     }
     fn begin_trial(&self, meas: &Meas) {
+        self.held.set(self.phase.get() == PH_ON);
         self.acc[0].reset();
         self.acc[1].reset();
         meas.active.set(meas.active.get() + 1);
@@ -2337,15 +2348,20 @@ impl UnitStat {
         let d = cached - plain;
         self.last.set((plain, cached));
         self.trials.set(total + 1);
-        let done = least >= 8192;
-        if d < -2.5 * se || (done && d < 0.0) {
+        let done = least >= 4096;
+        // (a trial of n evaluations is followed by at least 16 n evaluations without one)
+        self.again.set((self.count.get() * 16).max(1 << 20));
+        // (a unit that had the cache keeps it unless the trial goes against it)
+        let held = self.held.get();
+        if d < -2.5 * se || (done && d < if held { se } else { -se }) {
             meas.active.set(meas.active.get() - 1);
             self.penalty.set(0);
             self.off.set(false);
             self.mark.set(self.hits.get());
             self.mark_l.set(self.lookups.get());
             self.enter(PH_ON);
-        } else if d > 2.5 * se || done {
+        } else if d > 2.5 * se || done || (!held && least >= 1024 && d > 0.0) {
+            // (a trial costs time too: past 1024 states per side it goes on only while the cache is ahead)
             meas.active.set(meas.active.get() - 1);
             self.turn_off(d > 3.0 * se && d > 0.05 * plain);
         }
@@ -2354,7 +2370,7 @@ impl UnitStat {
     fn turn_off(&self, far: bool) {
         let p = if far { 1 << 22 } else { (self.penalty.get() * 2).clamp(1 << 18, 1 << 22) };
         self.penalty.set(p);
-        self.skip.set(p);
+        self.skip.set(p.max(self.again.get()));
         self.off.set(true);
         self.enter(PH_OFF);
     }
