@@ -1,0 +1,262 @@
+{
+ "load": [
+  1.76513671875,
+  1.50537109375,
+  1.244140625
+ ],
+ "runs": 7,
+ "rows": [
+  {
+   "model": "OrSet-fixed-f4",
+   "workers": "1",
+   "compiled": {
+    "wallS": 3.94,
+    "cpuS": 3.89,
+    "rssMb": 386,
+    "distinct": 524832,
+    "generated": 2983987
+   },
+   "cache32": {
+    "wallS": 3.64,
+    "cpuS": 3.62,
+    "rssMb": 383,
+    "distinct": 524832,
+    "generated": 2983987
+   }
+  },
+  {
+   "model": "OrSet-fixed-f4",
+   "workers": "4",
+   "compiled": {
+    "wallS": 1.31,
+    "cpuS": 4.39,
+    "rssMb": 282,
+    "distinct": 524832,
+    "generated": 2983987
+   },
+   "cache32": {
+    "wallS": 1.32,
+    "cpuS": 4.36,
+    "rssMb": 281,
+    "distinct": 524832,
+    "generated": 2983987
+   }
+  },
+  {
+   "model": "ReadRepair-fixed-f6",
+   "workers": "1",
+   "compiled": {
+    "wallS": 2.79,
+    "cpuS": 2.79,
+    "rssMb": 228,
+    "distinct": 383579,
+    "generated": 2917394
+   },
+   "cache32": {
+    "wallS": 2.66,
+    "cpuS": 2.62,
+    "rssMb": 217,
+    "distinct": 383579,
+    "generated": 2917394
+   }
+  },
+  {
+   "model": "ReadRepair-fixed-f6",
+   "workers": "4",
+   "compiled": {
+    "wallS": 0.96,
+    "cpuS": 3.19,
+    "rssMb": 176,
+    "distinct": 383579,
+    "generated": 2917394
+   },
+   "cache32": {
+    "wallS": 0.91,
+    "cpuS": 3.06,
+    "rssMb": 192,
+    "distinct": 383579,
+    "generated": 2917394
+   }
+  },
+  {
+   "model": "LostUpdate-fixed-f6",
+   "workers": "1",
+   "compiled": {
+    "wallS": 2.6,
+    "cpuS": 2.58,
+    "rssMb": 226,
+    "distinct": 420646,
+    "generated": 2449693
+   },
+   "cache32": {
+    "wallS": 2.3,
+    "cpuS": 2.28,
+    "rssMb": 215,
+    "distinct": 420646,
+    "generated": 2449693
+   }
+  },
+  {
+   "model": "LostUpdate-fixed-f6",
+   "workers": "4",
+   "compiled": {
+    "wallS": 0.8,
+    "cpuS": 2.68,
+    "rssMb": 154,
+    "distinct": 420646,
+    "generated": 2449693
+   },
+   "cache32": {
+    "wallS": 0.8,
+    "cpuS": 2.56,
+    "rssMb": 160,
+    "distinct": 420646,
+    "generated": 2449693
+   }
+  },
+  {
+   "model": "LeaseLock-fixed-f5",
+   "workers": "1",
+   "compiled": {
+    "wallS": 0.72,
+    "cpuS": 0.72,
+    "rssMb": 76,
+    "distinct": 122728,
+    "generated": 732907
+   },
+   "cache32": {
+    "wallS": 0.63,
+    "cpuS": 0.63,
+    "rssMb": 76,
+    "distinct": 122728,
+    "generated": 732907
+   }
+  },
+  {
+   "model": "LeaseLock-fixed-f5",
+   "workers": "4",
+   "compiled": {
+    "wallS": 0.29,
+    "cpuS": 0.79,
+    "rssMb": 78,
+    "distinct": 122728,
+    "generated": 732907
+   },
+   "cache32": {
+    "wallS": 0.26,
+    "cpuS": 0.72,
+    "rssMb": 80,
+    "distinct": 122728,
+    "generated": 732907
+   }
+  },
+  {
+   "model": "MCBakery",
+   "workers": "1",
+   "compiled": {
+    "wallS": 7.01,
+    "cpuS": 6.97,
+    "rssMb": 213,
+    "distinct": 655200,
+    "generated": 3403584
+   },
+   "cache32": {
+    "wallS": 6.91,
+    "cpuS": 6.89,
+    "rssMb": 214,
+    "distinct": 655200,
+    "generated": 3403584
+   }
+  },
+  {
+   "model": "MCBakery",
+   "workers": "4",
+   "compiled": {
+    "wallS": 3.8,
+    "cpuS": 8.08,
+    "rssMb": 356,
+    "distinct": 655200,
+    "generated": 3403584
+   },
+   "cache32": {
+    "wallS": 3.74,
+    "cpuS": 7.85,
+    "rssMb": 366,
+    "distinct": 655200,
+    "generated": 3403584
+   }
+  },
+  {
+   "model": "SimpleRegular",
+   "workers": "1",
+   "compiled": {
+    "wallS": 3.26,
+    "cpuS": 3.25,
+    "rssMb": 178,
+    "distinct": 277726,
+    "generated": 1454776
+   },
+   "cache32": {
+    "wallS": 3.18,
+    "cpuS": 3.15,
+    "rssMb": 178,
+    "distinct": 277726,
+    "generated": 1454776
+   }
+  },
+  {
+   "model": "SimpleRegular",
+   "workers": "4",
+   "compiled": {
+    "wallS": 1.43,
+    "cpuS": 5.08,
+    "rssMb": 141,
+    "distinct": 277726,
+    "generated": 1454776
+   },
+   "cache32": {
+    "wallS": 1.45,
+    "cpuS": 5.08,
+    "rssMb": 145,
+    "distinct": 277726,
+    "generated": 1454776
+   }
+  },
+  {
+   "model": "VoteProof",
+   "workers": "1",
+   "compiled": {
+    "wallS": 5.24,
+    "cpuS": 5.21,
+    "rssMb": 16,
+    "distinct": 6962,
+    "generated": 318877
+   },
+   "cache32": {
+    "wallS": 5.04,
+    "cpuS": 5.02,
+    "rssMb": 18,
+    "distinct": 6962,
+    "generated": 318877
+   }
+  },
+  {
+   "model": "VoteProof",
+   "workers": "4",
+   "compiled": {
+    "wallS": 1.54,
+    "cpuS": 5.27,
+    "rssMb": 46,
+    "distinct": 6962,
+    "generated": 318877
+   },
+   "cache32": {
+    "wallS": 1.65,
+    "cpuS": 5.31,
+    "rssMb": 48,
+    "distinct": 6962,
+    "generated": 318877
+   }
+  }
+ ]
+}

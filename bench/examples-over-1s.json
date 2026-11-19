@@ -1,0 +1,191 @@
+{
+ "load": [
+  1.00146484375,
+  1.0,
+  1.0
+ ],
+ "runs": 5,
+ "min": 1.0,
+ "rows": [
+  {
+   "model": "MCCRDT",
+   "cfg": "specifications/FiniteMonotonic/MCCRDT.cfg",
+   "compiled": {
+    "cpuS": 4.258,
+    "rssMb": 38,
+    "distinct": 25000,
+    "generated": 1350001,
+    "status": "ok"
+   },
+   "cache": {
+    "cpuS": 4.42,
+    "rssMb": 38,
+    "distinct": 25000,
+    "generated": 1350001,
+    "status": "ok"
+   },
+   "ratio": 1.038,
+   "same": true
+  },
+  {
+   "model": "SimpleRegular",
+   "cfg": "specifications/TeachingConcurrency/SimpleRegular.cfg",
+   "compiled": {
+    "cpuS": 3.099,
+    "rssMb": 178,
+    "distinct": 277726,
+    "generated": 1454776,
+    "status": "ok"
+   },
+   "cache": {
+    "cpuS": 3.19,
+    "rssMb": 178,
+    "distinct": 277726,
+    "generated": 1454776,
+    "status": "ok"
+   },
+   "ratio": 1.029,
+   "same": true
+  },
+  {
+   "model": "GameOfLife",
+   "cfg": "specifications/GameOfLife/GameOfLife.cfg",
+   "compiled": {
+    "cpuS": 8.583,
+    "rssMb": 36,
+    "distinct": 65536,
+    "generated": 131072,
+    "status": "ok"
+   },
+   "cache": {
+    "cpuS": 8.778,
+    "rssMb": 37,
+    "distinct": 65536,
+    "generated": 131072,
+    "status": "ok"
+   },
+   "ratio": 1.023,
+   "same": true
+  },
+  {
+   "model": "MCBinarySearch",
+   "cfg": "specifications/LoopInvariance/MCBinarySearch.cfg",
+   "compiled": {
+    "cpuS": 0.945,
+    "rssMb": 120,
+    "distinct": 27953,
+    "generated": 34383,
+    "status": "ok"
+   },
+   "cache": {
+    "cpuS": 0.965,
+    "rssMb": 126,
+    "distinct": 27953,
+    "generated": 34383,
+    "status": "ok"
+   },
+   "ratio": 1.021,
+   "same": true
+  },
+  {
+   "model": "MCQuicksort",
+   "cfg": "specifications/LoopInvariance/MCQuicksort.cfg",
+   "compiled": {
+    "cpuS": 2.656,
+    "rssMb": 15,
+    "distinct": 4548,
+    "generated": 11223,
+    "status": "ok"
+   },
+   "cache": {
+    "cpuS": 2.694,
+    "rssMb": 17,
+    "distinct": 4548,
+    "generated": 11223,
+    "status": "ok"
+   },
+   "ratio": 1.014,
+   "same": true
+  },
+  {
+   "model": "VoteProof",
+   "cfg": "specifications/byzpaxos/VoteProof.cfg",
+   "compiled": {
+    "cpuS": 5.143,
+    "rssMb": 16,
+    "distinct": 6962,
+    "generated": 318877,
+    "status": "ok"
+   },
+   "cache": {
+    "cpuS": 5.121,
+    "rssMb": 18,
+    "distinct": 6962,
+    "generated": 318877,
+    "status": "ok"
+   },
+   "ratio": 0.996,
+   "same": true
+  },
+  {
+   "model": "YoYoAllGraphs",
+   "cfg": "specifications/YoYo/YoYoAllGraphs.cfg",
+   "compiled": {
+    "cpuS": 2.125,
+    "rssMb": 49,
+    "distinct": 26731,
+    "generated": 48535,
+    "status": "ok"
+   },
+   "cache": {
+    "cpuS": 2.105,
+    "rssMb": 52,
+    "distinct": 26731,
+    "generated": 48535,
+    "status": "ok"
+   },
+   "ratio": 0.991,
+   "same": true
+  },
+  {
+   "model": "SpanTreeRandom",
+   "cfg": "specifications/SpanningTree/SpanTreeRandom.cfg",
+   "compiled": {
+    "cpuS": 2.815,
+    "rssMb": 80,
+    "distinct": 65396,
+    "generated": 1044320,
+    "status": "ok"
+   },
+   "cache": {
+    "cpuS": 2.784,
+    "rssMb": 82,
+    "distinct": 65396,
+    "generated": 1044320,
+    "status": "ok"
+   },
+   "ratio": 0.989,
+   "same": true
+  },
+  {
+   "model": "Barriers",
+   "cfg": "specifications/barriers/Barriers.cfg",
+   "compiled": {
+    "cpuS": 1.849,
+    "rssMb": 20,
+    "distinct": 29279,
+    "generated": 104515,
+    "status": "ok"
+   },
+   "cache": {
+    "cpuS": 1.784,
+    "rssMb": 21,
+    "distinct": 29279,
+    "generated": 104515,
+    "status": "ok"
+   },
+   "ratio": 0.965,
+   "same": true
+  }
+ ]
+}

@@ -2162,12 +2162,12 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
         _ => return inner(cx, k),
     };
     // Whether the cache pays for this unit is measured, not assumed: the time of evaluations without it
-    // (a baseline of 256, every other one timed) against the time of evaluations with it once the table is warm
-    // (hits and misses as they come). A unit gets the cache when that is 10 % cheaper and keeps it while it is
-    // 3 % cheaper; it is
-    // measured again every 65536 evaluations, and a unit that does not pay is evaluated without the cache
-    // for 262144 evaluations, then twice as long each time it fails again (up to 4 million; at once 4 million
-    // when it is more than 30 % dearer).
+    // (a baseline of 256, every other one timed) against the time of evaluations with it once the table is
+    // warm (hits and misses as they come); `judge` has the thresholds. A unit that has the cache is timed
+    // one evaluation in 16 and measured again every 65536 evaluations, or as soon as 4096 evaluations missed
+    // more than one time in five and came within 10 % of the time without the cache. A unit that does not
+    // pay is evaluated without the cache for 262144 evaluations, then twice as long each time it fails
+    // again (up to 4 million; at once 4 million when it is far from paying).
     if cx.cache_always {
         // EVERYSTATE_STEP_CACHE=always (for testing): every unit uses the cache, whether or not it pays
         return unit_cached(cx, k, table, id, bound, clear, inner, stat, n);
@@ -2583,9 +2583,18 @@ pub struct Plans {
     cache_always: bool,
 }
 
-/// EVERYSTATE_STEP_CACHE=on (an experiment; it implies the compiled evaluator)
+/// The step cache is on with the compiled evaluator; EVERYSTATE_STEP_CACHE=off turns it off. (`on` and
+/// `always` ask for it even with EVERYSTATE_EVAL=tree; `always` gives it to every unit, for testing.)
+/// In WebAssembly it is off: there is no clock to measure whether it pays, so no unit would ever keep it.
 pub fn cache_enabled() -> bool {
-    matches!(std::env::var("EVERYSTATE_STEP_CACHE").as_deref(), Ok("on") | Ok("always"))
+    if cfg!(target_arch = "wasm32") {
+        return false;
+    }
+    match std::env::var("EVERYSTATE_STEP_CACHE").as_deref() {
+        Ok("off") => false,
+        Ok("on") | Ok("always") => true,
+        _ => !matches!(std::env::var("EVERYSTATE_EVAL").as_deref(), Ok("tree")),
+    }
 }
 fn cache_budget() -> usize {
     let mb: f64 = std::env::var("EVERYSTATE_STEP_CACHE_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(32.0);

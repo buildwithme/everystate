@@ -1,4 +1,4 @@
-//! An experiment, off by default (EVERYSTATE_STEP_CACHE=on, with the compiled evaluator): a bounded
+//! On by default with the compiled evaluator (EVERYSTATE_STEP_CACHE=off turns it off): a bounded
 //! cache of local steps.
 //!
 //! A *unit* is an action instance of a compiled plan (what is left of an action below its top-level
