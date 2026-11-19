@@ -2222,8 +2222,8 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             unit_cached(cx, k, table, id, bound, clear, inner, stat, n)
         }
         ph => {
-            // PH_MEASURE (every other one timed, 256 evaluations, then the verdict) or PH_ON (one in 64 timed)
-            let sample = if ph == PH_MEASURE { c % 2 == 0 } else { c % 64 == 0 };
+            // PH_MEASURE (every other one timed, 256 evaluations, then the verdict) or PH_ON (one in 16 timed)
+            let sample = if ph == PH_MEASURE { c % 2 == 0 } else { c % 16 == 0 };
             let r = if sample {
                 let t = now_ns();
                 let r = unit_cached(cx, k, table, id, bound, clear, inner, stat, n);
@@ -2234,10 +2234,15 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             };
             if ph == PH_MEASURE && c == 256 {
                 stat.judge();
-            } else if ph == PH_ON && c == 65536 {
-                // a fresh baseline, then the verdict again
-                stat.plain.reset();
-                stat.enter(PH_BASE);
+            } else if ph == PH_ON && c % 4096 == 0 {
+                // a fresh baseline, then the verdict again: every 65536 evaluations, and as soon as the last
+                // 4096 (256 of them timed) came within 10 % of the time without the cache
+                if c == 65536 || stat.cached.mean() > 0.9 * stat.last.get().0 {
+                    stat.plain.reset();
+                    stat.enter(PH_BASE);
+                } else {
+                    stat.cached.reset();
+                }
             }
             r
         }
