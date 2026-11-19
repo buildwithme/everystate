@@ -2185,8 +2185,9 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             if c == 256 {
                 stat.mark.set(stat.hits.get());
                 stat.mark_l.set(stat.lookups.get());
-                // (a unit that takes less time than a lookup, typically a guard that fails, is not tried)
-                stat.enter(if stat.cached.n.get() > 0 || stat.plain.mean() < 150.0 { PH_JUDGE } else { PH_WARM });
+                // (a unit that takes little more time than a lookup - a guard that fails, a small step - is not
+                // tried: there is nothing to gain, and the measurement could not tell)
+                stat.enter(if stat.cached.n.get() > 0 || stat.plain.mean() < 400.0 { PH_JUDGE } else { PH_WARM });
                 if stat.phase.get() == PH_JUDGE {
                     stat.judge();
                 }
@@ -2279,14 +2280,14 @@ impl UnitStat {
         // other successor built from that entry (they are hashed once and allocated once), which saves time
         // after the unit, in fingerprinting and in memory; so a unit that mostly yields successors gets the
         // cache at equal time and keeps it up to 10 % above, while one that mostly yields none (a guard that
-        // fails) has nothing to gain downstream and must be 10 % cheaper to get it, 3 % to keep it.
+        // fails) has nothing to gain downstream and must be 15 % cheaper to get it, 5 % to keep it.
         // (only at a hit rate of 90 % or more: misses share nothing)
         let yields = self.succs.get() * 2 >= self.hits.get().max(1) && self.hits.get() * 10 >= self.lookups.get() * 9;
         let need = match (yields, self.was_on.get()) {
             (true, true) => 1.10,
             (true, false) => 1.0,
-            (false, true) => 0.97,
-            (false, false) => 0.90,
+            (false, true) => 0.95,
+            (false, false) => 0.85,
         };
         if self.plain.n.get() > 0 && self.cached.n.get() > 0 && cached < need * plain {
             self.was_on.set(true);
