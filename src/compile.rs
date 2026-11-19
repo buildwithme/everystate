@@ -2236,12 +2236,16 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
                 stat.judge();
             } else if ph == PH_ON && c % 4096 == 0 {
                 // a fresh baseline, then the verdict again: every 65536 evaluations, and as soon as the last
-                // 4096 (256 of them timed) came within 10 % of the time without the cache
-                if c == 65536 || stat.cached.mean() > 0.9 * stat.last.get().0 {
+                // 4096 (256 of them timed) missed more than one time in five and came within 10 % of the time
+                // without the cache (the table stopped finding what it found when the unit was measured)
+                let (looked, hit) = (stat.lookups.get() - stat.mark_l.get(), stat.hits.get() - stat.mark.get());
+                if c == 65536 || (hit * 5 < looked * 4 && stat.cached.mean() > 0.9 * stat.last.get().0) {
                     stat.plain.reset();
                     stat.enter(PH_BASE);
                 } else {
                     stat.cached.reset();
+                    stat.mark.set(stat.hits.get());
+                    stat.mark_l.set(stat.lookups.get());
                 }
             }
             r
@@ -2313,6 +2317,8 @@ impl UnitStat {
             self.penalty.set(0);
             self.off.set(false);
             self.cached.reset();
+            self.mark.set(self.hits.get());
+            self.mark_l.set(self.lookups.get());
             self.enter(PH_ON);
         } else {
             self.was_on.set(false);
