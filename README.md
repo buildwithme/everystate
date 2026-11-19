@@ -220,10 +220,11 @@ everystate [options] SPEC[.tla]
 Exit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error,
 151 config error.
 
-Environment: `EVERYSTATE_EVAL=tree` evaluates with the tree-walking interpreter alone (the default
-compiles actions and invariants first and gives the same results). `EVERYSTATE_STEP_CACHE=on` turns
-on an experimental cache of local steps, a fixed-size table of `EVERYSTATE_STEP_CACHE_MB` megabytes
-per worker (default 32): faster on models made of many small independent steps, slower on some others.
+Environment: actions and invariants are compiled before the search, and a cache of local steps
+reuses work between states that agree on what a step reads (a fixed-size table, 32 MB per worker,
+`EVERYSTATE_STEP_CACHE_MB`; used only where it measures faster during the run). Results are the
+same either way. `EVERYSTATE_STEP_CACHE=off` turns the cache off; `EVERYSTATE_EVAL=tree` uses the
+tree-walking interpreter alone.
 
 ## How it is checked
 
