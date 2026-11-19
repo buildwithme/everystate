@@ -954,6 +954,9 @@ impl<'a> Checker<'a> {
         self.successors_with(s, &mut RowSink { out, act: out_act, n: self.nvars })
     }
     fn successors_with(&self, s: &StateRef, sink: &mut dyn Sink) -> R<()> {
+        if let Some(plans) = &self.plans {
+            plans.tick();
+        }
         let ev = self.ev;
         let m = self.model;
         let n = self.nvars;

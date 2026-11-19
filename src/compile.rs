@@ -42,6 +42,7 @@ pub struct Cx<'a> {
     pub rec_on: &'a Cell<bool>,
     pub rec: &'a RefCell<Rec>,
     pub cache_always: bool,
+    pub meas: &'a Meas,
 }
 /// What the evaluation of a unit read and did, noted for the step cache.
 #[derive(Default)]
@@ -429,19 +430,20 @@ pub struct UnitStat {
     phase: Cell<u8>,
     /// evaluations in the current phase
     count: Cell<u64>,
-    /// sampled times without and with the cache
-    plain: Mean,
-    cached: Mean,
-    was_on: Cell<bool>,
-    /// hits when the warm-up began
-    mark: Cell<u64>,
+    /// on trial: the time per state expanded without (0) and with (1) the cache
+    acc: [Acc; 2],
+    /// on trial: the last expansion this unit was evaluated in, and whether it uses the cache in it
+    seen: Cell<u64>,
+    arm: Cell<bool>,
+    /// the means at the last verdict, and the number of states it was based on
     last: Cell<(f64, f64)>,
+    trials: Cell<u64>,
+    /// hits and lookups when the warm-up or the current window began
+    mark: Cell<u64>,
     mark_l: Cell<u64>,
     /// evaluations whose result was stored, and that count when the warm-up began
     stored: Cell<u64>,
     mark_s: Cell<u64>,
-    /// successors handed out on hits
-    succs: Cell<u64>,
 }
 type Loc4 = [u32; 4];
 
@@ -1811,7 +1813,7 @@ impl Comp {
         let clear = self.cache_slots.clone();
         let id = (self.plan_id << 16) | self.units;
         self.units += 1;
-        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_BASE), count: Cell::new(0), plain: Mean::default(), cached: Mean::default(), was_on: Cell::new(false), mark: Cell::new(0), last: Cell::new((0.0, 0.0)), mark_l: Cell::new(0), stored: Cell::new(0), mark_s: Cell::new(0), succs: Cell::new(0) });
+        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_WARM), count: Cell::new(0), acc: Default::default(), seen: Cell::new(0), arm: Cell::new(false), last: Cell::new((0.0, 0.0)), trials: Cell::new(0), mark: Cell::new(0), mark_l: Cell::new(0), stored: Cell::new(0), mark_s: Cell::new(0) });
         self.unit_stats.push(stat.clone());
         Box::new(move |cx, k| unit_run(cx, k, id, &bound, &clear, &inner, &stat, n))
     }
@@ -2156,18 +2158,21 @@ fn bound_eq(vals: &[Value], cx: &Cx, bound: &[usize]) -> bool {
 /// A unit with the step cache on: the stored successors when an entry matches the state, else an
 /// evaluation that is recorded and stored.
 #[allow(clippy::too_many_arguments)]
-fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], clear: &[usize], inner: &AE, stat: &UnitStat, n: N) -> R<()> {
+fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], clear: &[usize], inner: &AE, stat: &Rc<UnitStat>, n: N) -> R<()> {
     let table = match cx.cache {
         Some(t) if !cx.rec_on.get() && cx.ev.n_assigned.get() == 0 => t,
         _ => return inner(cx, k),
     };
-    // Whether the cache pays for this unit is measured, not assumed: the time of evaluations without it
-    // (a baseline of 256, every other one timed) against the time of evaluations with it once the table is
-    // warm (hits and misses as they come); `judge` has the thresholds. A unit that has the cache is timed
-    // one evaluation in 16 and measured again every 65536 evaluations, or as soon as 4096 evaluations missed
-    // more than one time in five and came within 10 % of the time without the cache. A unit that does not
-    // pay is evaluated without the cache for 262144 evaluations, then twice as long each time it fails
-    // again (up to 4 million; at once 4 million when it is far from paying).
+    // Whether the cache pays for this unit is measured, not assumed, and measured on the whole work per
+    // state rather than on the unit alone (a successor built from an entry shares its new values with its
+    // parent and with the other successors built from that entry, which saves time after the unit, in
+    // fingerprinting and in memory). After a warm-up the unit goes on trial: for each state expanded it is
+    // evaluated with or without the cache, chosen by a hash of the state's number, and the time from that
+    // expansion to the next is added to the one or the other mean (`UnitStat::sample`). The unit gets the
+    // cache when the mean with it is lower. A unit that has the cache goes on trial again every 262144
+    // evaluations, or when 4096 evaluations missed more than one time in five; a unit that does not pay is
+    // evaluated without the cache for 262144 evaluations, then twice as long each time it fails again (up
+    // to 4 million; at once 4 million when it is far from paying).
     if cx.cache_always {
         // EVERYSTATE_STEP_CACHE=always (for testing): every unit uses the cache, whether or not it pays
         return unit_cached(cx, k, table, id, bound, clear, inner, stat, n);
@@ -2177,117 +2182,129 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
     match stat.phase.get() {
         PH_OFF => {
             if c >= stat.skip.get() {
-                stat.enter(PH_BASE);
+                stat.enter(PH_WARM);
             }
             inner(cx, k)
         }
-        PH_BASE => {
-            let r = if c % 2 == 0 {
-                let t = now_ns();
-                let r = inner(cx, k);
-                stat.plain.add(now_ns() - t);
-                r
-            } else {
-                inner(cx, k)
-            };
-            if c == 256 {
+        PH_WARM => {
+            if c == 1 {
                 stat.mark.set(stat.hits.get());
                 stat.mark_l.set(stat.lookups.get());
                 stat.mark_s.set(stat.stored.get());
-                // (a unit that takes little more time than a lookup - a guard that fails, a small step - is not
-                // tried: there is nothing to gain, and the measurement could not tell)
-                stat.enter(if stat.cached.n.get() > 0 || stat.plain.mean() < 400.0 { PH_JUDGE } else { PH_WARM });
-                if stat.phase.get() == PH_JUDGE {
-                    stat.judge();
-                }
             }
-            r
-        }
-        PH_WARM => {
             if c == 32 && stat.hits.get() == stat.mark.get() && stat.stored.get() == stat.mark_s.get() {
                 // nothing could be stored in 32 evaluations (the tree-walker was needed, or the key is too
                 // large): no entry will ever be found
-                stat.cached.reset();
-                stat.judge();
+                stat.turn_off(true);
             } else if c == 256 {
                 // a table that is still mostly missing after 256 lookups is not going to pay
-                let hits = stat.hits.get() - stat.mark.get();
-                if hits * 2 < 256 {
-                    stat.cached.reset();
-                    stat.judge();
+                if (stat.hits.get() - stat.mark.get()) * 2 < 256 {
+                    stat.turn_off(true);
                 } else {
-                    stat.enter(PH_MEASURE);
+                    stat.begin_trial(cx.meas);
                 }
             }
             unit_cached(cx, k, table, id, bound, clear, inner, stat, n)
         }
-        ph => {
-            // PH_MEASURE (every other one timed, 256 evaluations, then the verdict) or PH_ON (one in 16 timed)
-            let sample = if ph == PH_MEASURE { c % 2 == 0 } else { c % 16 == 0 };
-            let r = if sample {
-                let t = now_ns();
-                let r = unit_cached(cx, k, table, id, bound, clear, inner, stat, n);
-                stat.cached.add(now_ns() - t);
-                r
-            } else {
+        PH_TRIAL => {
+            let e = cx.meas.exp.get();
+            if stat.seen.get() != e {
+                stat.seen.set(e);
+                stat.arm.set((sc_::mix(e, id as u64) >> 17) & 1 == 1);
+                cx.meas.touched.borrow_mut().push(stat.clone());
+            }
+            if stat.arm.get() {
                 unit_cached(cx, k, table, id, bound, clear, inner, stat, n)
-            };
-            if ph == PH_MEASURE && c == 256 {
-                stat.judge();
-            } else if ph == PH_ON && c % 4096 == 0 {
-                // a fresh baseline, then the verdict again: every 65536 evaluations, and as soon as the last
-                // 4096 (256 of them timed) missed more than one time in five and came within 10 % of the time
-                // without the cache (the table stopped finding what it found when the unit was measured)
+            } else {
+                inner(cx, k)
+            }
+        }
+        _ => {
+            if c % 4096 == 0 {
                 let (looked, hit) = (stat.lookups.get() - stat.mark_l.get(), stat.hits.get() - stat.mark.get());
-                if c == 65536 || (hit * 5 < looked * 4 && stat.cached.mean() > 0.9 * stat.last.get().0) {
-                    stat.plain.reset();
-                    stat.enter(PH_BASE);
+                if c >= 1 << 18 || hit * 5 < looked * 4 {
+                    stat.begin_trial(cx.meas);
                 } else {
-                    stat.cached.reset();
                     stat.mark.set(stat.hits.get());
                     stat.mark_l.set(stat.lookups.get());
                 }
             }
-            r
+            unit_cached(cx, k, table, id, bound, clear, inner, stat, n)
         }
     }
 }
-const PH_BASE: u8 = 0;
-const PH_WARM: u8 = 1;
-const PH_MEASURE: u8 = 2;
+const PH_WARM: u8 = 0;
+const PH_TRIAL: u8 = 1;
 const PH_ON: u8 = 3;
 const PH_OFF: u8 = 4;
-const PH_JUDGE: u8 = 5;
-/// Nanoseconds from some fixed moment. (No clock in WebAssembly: there the measurement reads zero and no
-/// unit ever keeps the cache.)
+/// Nanoseconds from some fixed moment. (No clock in WebAssembly; the step cache is off there.)
 #[cfg(not(target_arch = "wasm32"))]
 fn now_ns() -> u64 {
     use std::sync::OnceLock;
     static T0: OnceLock<std::time::Instant> = OnceLock::new();
-    T0.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+    T0.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64 + 1
 }
 #[cfg(target_arch = "wasm32")]
 fn now_ns() -> u64 {
     0
 }
+/// The measurement shared by the units of one `Plans`: the number of the state being expanded, when its
+/// expansion began, and the units on trial that were evaluated in it.
+pub struct Meas {
+    /// units on trial
+    active: Cell<u32>,
+    t0: Cell<u64>,
+    exp: Cell<u64>,
+    touched: RefCell<Vec<Rc<UnitStat>>>,
+}
+impl Meas {
+    fn new() -> Meas {
+        Meas { active: Cell::new(0), t0: Cell::new(0), exp: Cell::new(1), touched: RefCell::new(Vec::new()) }
+    }
+    /// A state is about to be expanded: the time since the last such moment goes to the units on trial
+    /// that were evaluated in between. (No clock is read while no unit is on trial.)
+    #[inline]
+    fn tick(&self) {
+        if self.active.get() == 0 && self.t0.get() == 0 {
+            return;
+        }
+        let now = now_ns();
+        let t0 = self.t0.replace(if self.active.get() == 0 { 0 } else { now });
+        self.exp.set(self.exp.get() + 1);
+        let mut t = self.touched.borrow_mut();
+        if t0 != 0 {
+            for u in t.iter() {
+                u.sample((now - t0) as f64, self);
+            }
+        }
+        t.clear();
+    }
+}
 #[derive(Default)]
-struct Mean {
-    sum: Cell<u64>,
+struct Acc {
+    sum: Cell<f64>,
+    sq: Cell<f64>,
     n: Cell<u64>,
 }
-impl Mean {
-    #[inline]
-    fn add(&self, dt: u64) {
-        // (one descheduled sample must not decide)
-        self.sum.set(self.sum.get() + dt.min(200_000));
+impl Acc {
+    fn add(&self, x: f64) {
+        self.sum.set(self.sum.get() + x);
+        self.sq.set(self.sq.get() + x * x);
         self.n.set(self.n.get() + 1);
     }
     fn reset(&self) {
-        self.sum.set(0);
+        self.sum.set(0.0);
+        self.sq.set(0.0);
         self.n.set(0);
     }
     fn mean(&self) -> f64 {
-        self.sum.get() as f64 / self.n.get().max(1) as f64
+        self.sum.get() / self.n.get().max(1) as f64
+    }
+    /// the variance of the mean
+    fn var_mean(&self) -> f64 {
+        let n = self.n.get().max(2) as f64;
+        let m = self.sum.get() / n;
+        ((self.sq.get() / n - m * m).max(0.0)) / (n - 1.0)
     }
 }
 impl UnitStat {
@@ -2295,45 +2312,51 @@ impl UnitStat {
         self.phase.set(phase);
         self.count.set(0);
     }
-    /// The verdict after a measurement.
-    fn judge(&self) {
-        let (plain, cached) = (self.plain.mean(), self.cached.mean());
+    fn begin_trial(&self, meas: &Meas) {
+        self.acc[0].reset();
+        self.acc[1].reset();
+        meas.active.set(meas.active.get() + 1);
+        self.enter(PH_TRIAL);
+    }
+    /// One state expanded with this unit on trial took `dt` ns (to the next expansion).
+    fn sample(&self, dt: f64, meas: &Meas) {
+        if self.phase.get() != PH_TRIAL {
+            return;
+        }
+        let (a, b) = (&self.acc[0], &self.acc[1]);
+        let total = a.n.get() + b.n.get();
+        // (one descheduled sample, or one that grew the fingerprint set, must not decide)
+        let x = if total >= 32 { dt.min(8.0 * (a.sum.get() + b.sum.get()) / total as f64) } else { dt };
+        self.acc[self.arm.get() as usize].add(x);
+        let least = a.n.get().min(b.n.get());
+        if least < 512 || (total + 1) % 256 != 0 {
+            return;
+        }
+        let (plain, cached) = (a.mean(), b.mean());
+        let se = (a.var_mean() + b.var_mean()).sqrt();
+        let d = cached - plain;
         self.last.set((plain, cached));
-        // What is timed is the unit alone. A successor built from an entry shares its new values with every
-        // other successor built from that entry (they are hashed once and allocated once), which saves time
-        // after the unit, in fingerprinting and in memory; so a unit that mostly yields successors gets the
-        // cache at equal time and keeps it up to 10 % above, while one that mostly yields none (a guard that
-        // fails) has nothing to gain downstream and must be 15 % cheaper to get it, 5 % to keep it.
-        // (only at a hit rate of 90 % or more: misses share nothing)
-        let yields = self.succs.get() * 2 >= self.hits.get().max(1) && self.hits.get() * 10 >= self.lookups.get() * 9;
-        let need = match (yields, self.was_on.get()) {
-            (true, true) => 1.10,
-            (true, false) => 1.0,
-            (false, true) => 0.95,
-            (false, false) => 0.85,
-        };
-        if self.plain.n.get() > 0 && self.cached.n.get() > 0 && cached < need * plain {
-            self.was_on.set(true);
+        self.trials.set(total + 1);
+        let done = least >= 8192;
+        if d < -2.5 * se || (done && d < 0.0) {
+            meas.active.set(meas.active.get() - 1);
             self.penalty.set(0);
             self.off.set(false);
-            self.cached.reset();
             self.mark.set(self.hits.get());
             self.mark_l.set(self.lookups.get());
             self.enter(PH_ON);
-        } else {
-            self.was_on.set(false);
-            // far from paying: not worth trying again soon
-            // (judged only when the table was warm, or plainly never will be)
-            let (looked, hit) = (self.lookups.get() - self.mark_l.get(), self.hits.get() - self.mark.get());
-            let far = self.cached.n.get() == 0 || hit * 2 < looked || (hit * 10 >= looked * 9 && cached > 1.3 * plain);
-            let p = if far { 1 << 22 } else { (self.penalty.get() * 2).clamp(1 << 18, 1 << 22) };
-            self.penalty.set(p);
-            self.skip.set(p);
-            self.off.set(true);
-            self.plain.reset();
-            self.cached.reset();
-            self.enter(PH_OFF);
+        } else if d > 2.5 * se || done {
+            meas.active.set(meas.active.get() - 1);
+            self.turn_off(d > 3.0 * se && d > 0.05 * plain);
         }
+    }
+    /// The cache does not pay for this unit; `far`: not worth trying again soon.
+    fn turn_off(&self, far: bool) {
+        let p = if far { 1 << 22 } else { (self.penalty.get() * 2).clamp(1 << 18, 1 << 22) };
+        self.penalty.set(p);
+        self.skip.set(p);
+        self.off.set(true);
+        self.enter(PH_OFF);
     }
 }
 #[allow(clippy::too_many_arguments)]
@@ -2386,7 +2409,6 @@ fn unit_cached(cx: &Cx, k: &mut dyn FnMut() -> R<()>, table: &RefCell<Table>, id
             t.n.lookups += 1;
             t.n.hits += 1;
         }
-        stat.succs.set(stat.succs.get() + (rows.len() / nv.max(1)) as u64);
         let mut rows = rows.into_iter();
         while rows.len() > 0 {
             for i in 0..nv {
@@ -2581,6 +2603,7 @@ pub struct Plans {
     rec: RefCell<Rec>,
     units: Vec<Rc<UnitStat>>,
     cache_always: bool,
+    meas: Meas,
 }
 
 /// The step cache is on with the compiled evaluator; EVERYSTATE_STEP_CACHE=off turns it off. (`on` and
@@ -2667,6 +2690,7 @@ pub fn compile(model: &crate::model::Model) -> Plans {
         rec: RefCell::new(Rec::default()),
         units,
         cache_always: matches!(std::env::var("EVERYSTATE_STEP_CACHE").as_deref(), Ok("always")),
+        meas: Meas::new(),
     }
 }
 
@@ -2682,7 +2706,7 @@ impl Plans {
                 return None;
             }
         };
-        let cx = Cx { ev, f: &p.frame, cur, nxt, nv: nv as i64, fallbacks: &self.n.fallbacks, cache: self.cache.as_ref(), rec_on: &self.rec_on, rec: &self.rec, cache_always: self.cache_always };
+        let cx = Cx { ev, f: &p.frame, cur, nxt, nv: nv as i64, fallbacks: &self.n.fallbacks, cache: self.cache.as_ref(), rec_on: &self.rec_on, rec: &self.rec, cache_always: self.cache_always, meas: &self.meas };
         let f0 = self.n.fallbacks.get();
         let r = (p.run)(&cx, k);
         self.rec_on.set(false);
@@ -2703,7 +2727,7 @@ impl Plans {
                 return None;
             }
         };
-        let cx = Cx { ev, f: &p.frame, cur: s, nxt: &self.blank, nv: nv as i64, fallbacks: &self.n.fallbacks, cache: None, rec_on: &self.rec_on, rec: &self.rec, cache_always: self.cache_always };
+        let cx = Cx { ev, f: &p.frame, cur: s, nxt: &self.blank, nv: nv as i64, fallbacks: &self.n.fallbacks, cache: None, rec_on: &self.rec_on, rec: &self.rec, cache_always: self.cache_always, meas: &self.meas };
         let f0 = self.n.fallbacks.get();
         let r = (p.run)(&cx);
         p.use_.note(self.n.fallbacks.get() - f0);
@@ -2717,6 +2741,11 @@ impl Plans {
                 None
             }
         }
+    }
+    /// To be called before each state is expanded (the step cache measures the time between such calls).
+    #[inline]
+    pub fn tick(&self) {
+        self.meas.tick();
     }
     pub fn report(&self) -> String {
         let c = &self.n;
@@ -2742,14 +2771,15 @@ impl Plans {
             if std::env::var_os("EVERYSTATE_EVAL_DEBUG").is_some() {
                 for u in &self.units {
                     cache += &format!(
-                        "  unit at line {} col {}: {} lookups, {} hits{}; last verdict on {:.0} ns without against {:.0} ns with the cache\n",
+                        "  unit at line {} col {}: {} lookups, {} hits{}; last verdict on {:.0} ns per state without against {:.0} ns with the cache ({} states)\n",
                         u.loc[0],
                         u.loc[1],
                         u.lookups.get(),
                         u.hits.get(),
                         if u.off.get() { " (does not pay)" } else { "" },
                         u.last.get().0,
-                        u.last.get().1
+                        u.last.get().1,
+                        u.trials.get()
                     );
                 }
             }
