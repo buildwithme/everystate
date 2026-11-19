@@ -436,6 +436,9 @@ pub struct UnitStat {
     mark: Cell<u64>,
     last: Cell<(f64, f64)>,
     mark_l: Cell<u64>,
+    /// evaluations whose result was stored, and that count when the warm-up began
+    stored: Cell<u64>,
+    mark_s: Cell<u64>,
     /// successors handed out on hits
     succs: Cell<u64>,
 }
@@ -1807,7 +1810,7 @@ impl Comp {
         let clear = self.cache_slots.clone();
         let id = (self.plan_id << 16) | self.units;
         self.units += 1;
-        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_BASE), count: Cell::new(0), plain: Mean::default(), cached: Mean::default(), was_on: Cell::new(false), mark: Cell::new(0), last: Cell::new((0.0, 0.0)), mark_l: Cell::new(0), succs: Cell::new(0) });
+        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0), phase: Cell::new(PH_BASE), count: Cell::new(0), plain: Mean::default(), cached: Mean::default(), was_on: Cell::new(false), mark: Cell::new(0), last: Cell::new((0.0, 0.0)), mark_l: Cell::new(0), stored: Cell::new(0), mark_s: Cell::new(0), succs: Cell::new(0) });
         self.unit_stats.push(stat.clone());
         Box::new(move |cx, k| unit_run(cx, k, id, &bound, &clear, &inner, &stat, n))
     }
@@ -2185,6 +2188,7 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             if c == 256 {
                 stat.mark.set(stat.hits.get());
                 stat.mark_l.set(stat.lookups.get());
+                stat.mark_s.set(stat.stored.get());
                 // (a unit that takes little more time than a lookup - a guard that fails, a small step - is not
                 // tried: there is nothing to gain, and the measurement could not tell)
                 stat.enter(if stat.cached.n.get() > 0 || stat.plain.mean() < 400.0 { PH_JUDGE } else { PH_WARM });
@@ -2195,7 +2199,12 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
             r
         }
         PH_WARM => {
-            if c == 256 {
+            if c == 32 && stat.hits.get() == stat.mark.get() && stat.stored.get() == stat.mark_s.get() {
+                // nothing could be stored in 32 evaluations (the tree-walker was needed, or the key is too
+                // large): no entry will ever be found
+                stat.cached.reset();
+                stat.judge();
+            } else if c == 256 {
                 // a table that is still mostly missing after 256 lookups is not going to pay
                 let hits = stat.hits.get() - stat.mark.get();
                 if hits * 2 < 256 {
@@ -2454,6 +2463,8 @@ fn unit_cached(cx: &Cx, k: &mut dyn FnMut() -> R<()>, table: &RefCell<Table>, id
     }
     if !stored {
         t.n.uncacheable += 1;
+    } else {
+        stat.stored.set(stat.stored.get() + 1);
     }
     r
 }
